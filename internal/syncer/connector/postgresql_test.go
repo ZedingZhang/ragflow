@@ -185,11 +185,18 @@ func TestPostgreSQLConnectorOpenSyncAllTables(t *testing.T) {
 			sqlmock.NewRows([]string{"table_name"}).AddRow("products").AddRow("orders"),
 		)
 		mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM (SELECT * FROM "public"."orders") AS ragflow_src ORDER BY ragflow_src.id ASC`)).WillReturnRows(
-			sqlmock.NewRows([]string{"id", "name"}).AddRow(2, "Order"),
+			sqlmock.NewRows([]string{"id", "name"}).AddRow(1, "Order"),
 		)
 		mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM (SELECT * FROM "public"."products") AS ragflow_src ORDER BY ragflow_src.id ASC`)).WillReturnRows(
 			sqlmock.NewRows([]string{"id", "name"}).AddRow(1, "Product"),
 		)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")).WillReturnRows(
+			sqlmock.NewRows([]string{"table_name"}).AddRow("products").AddRow("orders"),
+		)
+		for _, table := range []string{"orders", "products"} {
+			query := `SELECT ragflow_src.id FROM (SELECT * FROM "public"."` + table + `") AS ragflow_src`
+			mock.ExpectQuery(regexp.QuoteMeta(query)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+		}
 	})
 
 	session, err := connector.OpenSync(t.Context(), SyncRequest{FromBeginning: true})
@@ -209,8 +216,24 @@ func TestPostgreSQLConnectorOpenSyncAllTables(t *testing.T) {
 			ids = append(ids, doc.SourceID)
 		}
 	}
-	if len(ids) != 2 || ids[0] != "postgresql:mydb:2" || ids[1] != "postgresql:mydb:1" {
+	if len(ids) != 2 || ids[0] == ids[1] {
 		t.Fatalf("source ids = %v", ids)
+	}
+	prune, err := connector.OpenPrune(t.Context(), PruneRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := prune.NextBatch(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Documents) != 2 || batch.Documents[0].SourceID != ids[0] || batch.Documents[1].SourceID != ids[1] {
+		t.Fatalf("prune documents = %+v, want sync IDs %v", batch.Documents, ids)
+	}
+	for _, doc := range batch.Documents {
+		if doc.PreviousSourceID != "postgresql:mydb:1" {
+			t.Fatalf("previous source ID = %q", doc.PreviousSourceID)
+		}
 	}
 }
 
@@ -318,7 +341,7 @@ func TestPostgreSQLConnectorOpenSyncMixedCaseTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextBatch failed: %v", err)
 	}
-	if len(batch.Documents) != 1 || batch.Documents[0].SourceID != "postgresql:mydb:1" {
+	if len(batch.Documents) != 1 || batch.Documents[0].SourceID != "postgresql/table/mydb/MixedCase/1" {
 		t.Fatalf("documents = %+v", batch.Documents)
 	}
 }
@@ -536,7 +559,7 @@ func TestPostgreSQLConnectorOpenSyncResumeMultiTable(t *testing.T) {
 		)
 	})
 
-	anchor := "postgresql:mydb:1"
+	anchor := "postgresql/table/mydb/products/1"
 	session, err := connector.OpenSync(t.Context(), SyncRequest{
 		FromBeginning: true,
 		Resume:        &SyncCheckpoint{Cursor: encodeRDBMSCursor("products", "id", anchor), SourceID: anchor},
@@ -548,7 +571,7 @@ func TestPostgreSQLConnectorOpenSyncResumeMultiTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextBatch failed: %v", err)
 	}
-	if len(batch.Documents) != 1 || batch.Documents[0].SourceID != "postgresql:mydb:3" {
+	if len(batch.Documents) != 1 || batch.Documents[0].SourceID != "postgresql/table/mydb/products/3" {
 		t.Fatalf("documents = %+v", batch.Documents)
 	}
 	if _, err = session.NextBatch(context.Background()); !errors.Is(err, io.EOF) {
@@ -748,7 +771,7 @@ func TestPostgreSQLConnectorOpenSyncCheckpointQueryName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextBatch failed: %v", err)
 	}
-	if len(batch.Documents) != 1 || batch.Documents[0].SourceID != "postgresql:mydb:1" {
+	if len(batch.Documents) != 1 || batch.Documents[0].SourceID != "postgresql/table/mydb/orders/1" {
 		t.Fatalf("documents = %+v", batch.Documents)
 	}
 	if batch.Checkpoint == nil {
@@ -758,8 +781,8 @@ func TestPostgreSQLConnectorOpenSyncCheckpointQueryName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse cursor: %v", err)
 	}
-	if cursor.Query != "orders" {
-		t.Fatalf("checkpoint query = %q, want %q", cursor.Query, "orders")
+	if cursor.Query != "orders" || cursor.SourceID != batch.Documents[0].SourceID {
+		t.Fatalf("unexpected checkpoint: %+v", cursor)
 	}
 	if _, err = session.NextBatch(context.Background()); !errors.Is(err, io.EOF) {
 		t.Fatalf("NextBatch EOF = %v", err)

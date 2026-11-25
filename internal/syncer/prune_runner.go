@@ -66,6 +66,7 @@ func (r *PruneRunner) Run(ctx context.Context, taskContext dao.SyncTaskContext, 
 	defer session.Close()
 
 	retain := map[string]struct{}{}
+	previousSourceIDs := map[string]string{}
 	for {
 		if err := checkTaskCanceled(r.taskDAO, ctx, taskContext.Task.ID); err != nil {
 			return "", err
@@ -79,13 +80,16 @@ func (r *PruneRunner) Run(ctx context.Context, taskContext dao.SyncTaskContext, 
 		}
 		for _, doc := range batch.Documents {
 			service.AddRetainDocumentID(retain, taskContext.Knowledgebase.ID, taskContext.Connector.ID, doc.SourceID)
+			if doc.PreviousSourceID != "" {
+				previousSourceIDs[doc.SourceID] = doc.PreviousSourceID
+			}
 		}
 	}
 
 	if err := checkTaskCanceled(r.taskDAO, ctx, taskContext.Task.ID); err != nil {
 		return "", err
 	}
-	removed, err := r.pruneService.DeleteStale(ctx, taskContext, retain)
+	removed, err := r.pruneService.DeleteStale(ctx, taskContext, retain, previousSourceIDs)
 	if err != nil {
 		return "", err
 	}

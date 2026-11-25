@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 )
 
@@ -102,6 +103,8 @@ type PruneRequest struct {
 // SlimDocument is the minimal prune snapshot row.
 type SlimDocument struct {
 	SourceID string
+	// PreviousSourceID identifies a pre-upgrade document that may cover this row.
+	PreviousSourceID string
 }
 
 // PruneBatch contains one slim snapshot batch.
@@ -114,6 +117,19 @@ type PruneBatch struct {
 type rdbmsQuery struct {
 	name string
 	sql  string
+}
+
+// A custom query owns one row namespace. For discovered tables, keep each
+// path component distinct even when a database, table or key contains '/'.
+func rdbmsRowIdentity(dialect, database, table, key string) SlimDocument {
+	previous := dialect + ":" + database + ":" + key
+	if table == "" {
+		return SlimDocument{SourceID: previous}
+	}
+	return SlimDocument{
+		SourceID:         dialect + "/table/" + url.PathEscape(database) + "/" + url.PathEscape(table) + "/" + url.PathEscape(key),
+		PreviousSourceID: previous,
+	}
 }
 
 // rdbmsSyncQuery is one prepared sync query with its resume metadata.

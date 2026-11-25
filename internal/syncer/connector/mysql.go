@@ -166,11 +166,10 @@ func (c *MySQLConnector) OpenPrune(ctx context.Context, request PruneRequest) (P
 		db.Close()
 		return nil, err
 	}
-	queries := make([]string, 0, len(bases))
-	for _, base := range bases {
-		queries = append(queries, c.buildSlimQuery(base.sql))
+	for i := range bases {
+		bases[i].sql = c.buildSlimQuery(bases[i].sql)
 	}
-	return &mysqlPruneSession{connector: c, db: db, queries: queries, batchSize: c.batchSize}, nil
+	return &mysqlPruneSession{connector: c, db: db, queries: bases, batchSize: c.batchSize}, nil
 }
 
 // open builds a MySQL connection with Python-compatible settings. The default
@@ -461,21 +460,19 @@ func (c *MySQLConnector) buildContent(row map[string]any, columns []string) stri
 	return strings.Join(parts, "\n\n")
 }
 
-// buildDocumentID derives the stable document id, matching the Python format
-// "mysql:<database>:<id value>" with an MD5 content fallback.
-func (c *MySQLConnector) buildDocumentID(row map[string]any, orderedColumns []string) string {
+func (c *MySQLConnector) rowIdentity(table string, row map[string]any, orderedColumns []string) SlimDocument {
 	if c.idColumn != "" {
 		if value, ok := row[c.idColumn]; ok && value != nil {
-			return fmt.Sprintf("mysql:%s:%s", c.database, fmt.Sprint(value))
+			return rdbmsRowIdentity("mysql", c.database, table, fmt.Sprint(value))
 		}
 	}
 	content := c.buildContent(row, c.contentColumnsForRow(row, orderedColumns))
 	sum := md5.Sum([]byte(content))
-	return fmt.Sprintf("mysql:%s:%s", c.database, hex.EncodeToString(sum[:]))
+	return rdbmsRowIdentity("mysql", c.database, table, hex.EncodeToString(sum[:]))
 }
 
 // rowToSourceDocument converts a database row into the syncer model.
-func (c *MySQLConnector) rowToSourceDocument(row map[string]any, orderedColumns []string) (SourceDocument, bool) {
+func (c *MySQLConnector) rowToSourceDocument(table string, row map[string]any, orderedColumns []string) (SourceDocument, bool) {
 	contentColumns := c.contentColumnsForRow(row, orderedColumns)
 	content := c.buildContent(row, contentColumns)
 
@@ -507,7 +504,7 @@ func (c *MySQLConnector) rowToSourceDocument(row map[string]any, orderedColumns 
 		}
 	}
 
-	sourceID := c.buildDocumentID(row, orderedColumns)
+	sourceID := c.rowIdentity(table, row, orderedColumns).SourceID
 	blob := []byte(content)
 	return SourceDocument{
 		SourceID:           sourceID,
@@ -641,7 +638,7 @@ func (s *mysqlSyncSession) NextBatch(ctx context.Context) (SyncBatch, error) {
 			// Skip rows that fail to convert (mirrors Python).
 			continue
 		}
-		if doc, ok := s.connector.rowToSourceDocument(row, columns); ok {
+		if doc, ok := s.connector.rowToSourceDocument(s.queryNames[s.queryIndex-1], row, columns); ok {
 			if !s.includeResumed(doc) {
 				continue
 			}
@@ -723,6 +720,10 @@ func (s *mysqlSyncSession) applyResume(checkpoint *SyncCheckpoint) error {
 	if idx < 0 {
 		return fmt.Errorf("MySQL sync resume query %q no longer exists: %w", cursor.Query, ErrSyncResumeInvalid)
 	}
+	if cursor.Query != "" && strings.HasPrefix(cursor.SourceID, "mysql:") {
+		// Replay the window so its already-committed rows also get table-scoped IDs.
+		return fmt.Errorf("MySQL sync checkpoint predates table-scoped IDs: %w", ErrSyncResumeInvalid)
+	}
 	s.queryIndex = idx
 	s.resume = &cursor
 	s.resumePending = true
@@ -785,7 +786,7 @@ func isMySQLUnknownColumn(err error) bool {
 type mysqlPruneSession struct {
 	connector  *MySQLConnector
 	db         *sql.DB
-	queries    []string
+	queries    []rdbmsQuery
 	queryIndex int
 	rows       *sql.Rows
 	batchSize  int
@@ -818,7 +819,8 @@ func (s *mysqlPruneSession) NextBatch(ctx context.Context) (PruneBatch, error) {
 		if err != nil {
 			continue
 		}
-		documents = append(documents, SlimDocument{SourceID: s.connector.buildDocumentID(row, columns)})
+		table := s.queries[s.queryIndex-1].name
+		documents = append(documents, s.connector.rowIdentity(table, row, columns))
 	}
 	return PruneBatch{Documents: documents}, nil
 }
@@ -831,7 +833,7 @@ func (s *mysqlPruneSession) Close() error {
 
 // openNextQuery runs the next slim query.
 func (s *mysqlPruneSession) openNextQuery(ctx context.Context) error {
-	query := s.queries[s.queryIndex]
+	query := s.queries[s.queryIndex].sql
 	s.queryIndex++
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {

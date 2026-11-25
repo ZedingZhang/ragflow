@@ -61,10 +61,13 @@ func (r *DocumentIDResolver) ListFingerprintsBySourceType(ctx context.Context, k
 	return r.store.ListFingerprintsBySourceType(ctx, kbID, sourceType)
 }
 
+func syncDocumentIDs(kbID, connectorID, sourceID string) (legacyID, newID string) {
+	return Hash128(connectorID + ":" + sourceID), Hash128(kbID + ":" + connectorID + ":" + sourceID)
+}
+
 // Resolve chooses the legacy ID when already present in the KB.
 func (r *DocumentIDResolver) Resolve(ctx context.Context, kbID, connectorID, sourceType, sourceID string) (ResolvedDocumentID, error) {
-	legacyID := Hash128(connectorID + ":" + sourceID)
-	newID := Hash128(kbID + ":" + connectorID + ":" + sourceID)
+	legacyID, newID := syncDocumentIDs(kbID, connectorID, sourceID)
 
 	fingerprints, err := r.store.GetFingerprintsByIDs(ctx, kbID, sourceType, []string{legacyID, newID})
 	if err != nil {

@@ -267,6 +267,8 @@ The MySQL data source is used to synchronize table records or query results in M
 
 When using a custom query, use the column names or aliases returned by that query for the column settings. Click **Test connection** to check the configuration, then **Confirm** to create the connection.
 
+For MySQL and PostgreSQL connections that load all tables, row IDs are scoped to their source table. After upgrading an existing all-tables connection, run a full sync to import unchanged rows under their new document IDs. With **Sync deleted files** enabled, pruning retires an old shared document once all of its remaining source rows have been imported under their table-specific IDs. Links to the retired document will need updating. Custom SQL queries keep their existing document IDs.
+
 ![MySQL connection configuration](https://raw.githubusercontent.com/infiniflow/ragflow-docs/main/images/MySQL.jpg)
 
 ![MySQL additional configuration](https://raw.githubusercontent.com/infiniflow/ragflow-docs/main/images/MySQL_2.jpg)
